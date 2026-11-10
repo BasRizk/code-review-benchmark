@@ -26,6 +26,9 @@ For each finding, extract:
 - The category (bug, style, performance, security, refactor, documentation, other)
 - The file path and line number if available
 - Severity (low, medium, high, critical)
+- Whether the bot itself marked the finding as optional or non-blocking (bot_marked_optional):
+  true only when the bot's own words or section heading say so, for example "nit", "nitpick",
+  "optional", "trivial", or "non-blocking". Do not infer it from severity or tone.
 
 Skip generic praise, status/progress messages, quota/limit messages, pure summaries without a
 concrete finding, and "looks good" / "no issues found" comments. Also skip follow-up comments

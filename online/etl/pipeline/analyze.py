@@ -289,6 +289,20 @@ def _format_actions(actions: list[dict]) -> str:
     return "\n".join(lines) if lines else "(no actions)"
 
 
+def _bot_marked_optional_counts(suggestions: list[dict], matched_suggestion_ids: set[str]) -> dict[str, int]:
+    """Split suggestion counts by whether the bot itself labelled the finding optional/non-blocking.
+
+    Recorded for reporting only; precision and recall are unchanged.
+    """
+    optional_ids = {s["issue_id"] for s in suggestions if s.get("bot_marked_optional")}
+    return {
+        "optional_suggestions": len(optional_ids),
+        "optional_matched": len(optional_ids & matched_suggestion_ids),
+        "required_suggestions": len(suggestions) - len(optional_ids),
+        "required_matched": len(matched_suggestion_ids - optional_ids),
+    }
+
+
 async def analyze_single_pr(
     llm: LLMClient,
     repo: PRRepository,
@@ -416,6 +430,14 @@ async def analyze_single_pr(
         f_beta=f_beta,
         model_name=model_name,
     )
+
+    optional_counts = _bot_marked_optional_counts(suggestions, matched_suggestion_ids)
+    if optional_counts["optional_suggestions"]:
+        logger.info(
+            f"{repo_name}#{pr_row['pr_number']}: "
+            f"{optional_counts['optional_suggestions']} suggestions marked optional by the bot "
+            f"({optional_counts['optional_matched']} acted on)"
+        )
 
     logger.info(
         f"Analyzed {repo_name}#{pr_row['pr_number']}: "

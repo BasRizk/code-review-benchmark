@@ -44,6 +44,8 @@ This is the core of the benchmark — a three-step LLM analysis:
 - **Recall** = matched actions / total actions ("what % of real issues did the bot catch?")
 - **F-beta** = adjustable harmonic mean (F1 when beta=1)
 
+Each extracted suggestion also records `bot_marked_optional`: true when the bot itself labels the finding optional or non-blocking (for example "nit", "nitpick", "optional", "trivial"). It is stored with the suggestions for reporting and does not change precision or recall.
+
 ### 5. Label (optional)
 
 An LLM classifies each PR by language, domain (frontend/backend/infra), PR type (feature/bugfix/refactor), issue severity, and more. These labels power the dashboard filters.

@@ -15,6 +15,13 @@ class BotSuggestion(BaseModel):
     file_path: str | None = Field(default=None, description="File path the suggestion relates to")
     line_number: int | None = Field(default=None, description="Line number if applicable")
     severity: str = Field(default="medium", description="Severity: 'low', 'medium', 'high', 'critical'")
+    bot_marked_optional: bool = Field(
+        default=False,
+        description=(
+            "True only when the bot itself labels this finding as optional or non-blocking "
+            "(e.g. 'nit', 'nitpick', 'optional', 'trivial', 'non-blocking', or a section the bot titles that way)"
+        ),
+    )
 
 
 class BotSuggestionsResponse(BaseModel):
