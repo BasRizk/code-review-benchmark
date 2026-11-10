@@ -17,6 +17,13 @@ Your job is to identify every distinct substantive finding the bot flagged. A fi
 bug, defect, risk, incorrect behavior, missing validation, security concern, performance concern,
 maintainability issue, documentation problem, test gap, or other concrete code-review concern.
 
+Extract each finding once. Bots often restate findings they already made, for example a
+consolidated "prompt for AI agents" or "fix all" block that repeats the comments it covers, a list
+or table of the issues raised in a review, or a later review round that posts an earlier,
+still-open comment again. A restatement is not a new finding: extract the finding once, at its
+first and most detailed statement. Two different issues in the same file or on the same line are
+still two findings.
+
 Only extract findings grounded in the bot's comments. Do not invent findings solely from the
 commit diff. Use the commit diff only to understand code context for a comment.
 
