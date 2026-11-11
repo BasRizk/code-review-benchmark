@@ -1085,6 +1085,32 @@ mod tests {
     }
 
     #[test]
+    fn test_unset_version_serves_a_database_that_was_never_reanalyzed() {
+        // the database the API serves today: no stamped analyses
+        assert!(crate::db::check_served_set(false, None, 500, 0, 500).is_ok());
+    }
+
+    #[test]
+    fn test_unset_version_refuses_a_partly_reanalyzed_database() {
+        // a restart during an in-place backfill would serve an incomplete unstamped set
+        let err = crate::db::check_served_set(false, None, 300, 200, 500).unwrap_err();
+        assert!(err.contains("200 of 500"), "{err}");
+        assert!(err.contains("SERVED_PROMPT_VERSION"), "{err}");
+        // an explicit `unstamped` is the operator's choice and is served
+        assert!(crate::db::check_served_set(true, None, 300, 200, 500).is_ok());
+    }
+
+    #[test]
+    fn test_a_named_version_with_no_analyses_is_refused_not_served_empty() {
+        let err = crate::db::check_served_set(true, Some("extract-v2"), 0, 0, 500).unwrap_err();
+        assert!(err.contains("extract-v2"), "{err}");
+        // a backfilled copy switched to the new version serves it
+        assert!(crate::db::check_served_set(true, Some("extract-v2"), 497, 497, 500).is_ok());
+        // an empty database is not an error
+        assert!(crate::db::check_served_set(false, None, 0, 0, 0).is_ok());
+    }
+
+    #[test]
     fn test_prompt_stamp_matches_the_etl_constant() {
         let prompts = include_str!("../../etl/llm/prompts.py");
         let expected = format!(

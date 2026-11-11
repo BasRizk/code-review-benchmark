@@ -13,11 +13,41 @@ pub const EXTRACTION_PROMPT_VERSION: &str = "extract-v2";
 
 /// The analyses to serve, from `SERVED_PROMPT_VERSION`: unset, empty or `unstamped` serves the
 /// analyses made before prompt versions were stamped; a version (e.g. `extract-v2`) serves only
-/// analyses with that stamp. Only one prompt's analyses are ever served, so a window that is partly
-/// re-scored never mixes two prompts. Flip it after the backfill and the relabel, then restart.
+/// analyses with that stamp. Only one prompt's analyses are ever served, so the board never mixes
+/// two prompts. A re-analysis replaces a PR's analysis in place, so it runs on a copy of the
+/// database; the switch is pointing the API at the copy with this set to the new version.
 pub fn served_prompt_version(env: Option<String>) -> Option<String> {
     env.map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty() && v != "unstamped")
+}
+
+/// Refuse a board that is not the complete set the operator chose, instead of serving part of it:
+/// with `SERVED_PROMPT_VERSION` unset, a database holding stamped analyses (a re-analysis ran on
+/// it, so the unstamped set is no longer complete) is refused; so is a served set that is empty
+/// while the database holds analyses of merged PRs. `stamped` and `total` count analyses of
+/// merged PRs; `served` is how many the version selected.
+pub fn check_served_set(
+    env_set: bool,
+    version: Option<&str>,
+    served: usize,
+    stamped: i64,
+    total: i64,
+) -> Result<(), String> {
+    if !env_set && stamped > 0 {
+        return Err(format!(
+            "{stamped} of {total} analyses of merged PRs carry a prompt-version stamp, so this database \
+             was re-analyzed and its unstamped set is incomplete; set SERVED_PROMPT_VERSION to the \
+             version to serve (e.g. {EXTRACTION_PROMPT_VERSION}), or to `unstamped` to serve the rest anyway"
+        ));
+    }
+    if served == 0 && total > 0 {
+        return Err(format!(
+            "no analyses of merged PRs for prompt version {} ({total} carry other versions); check \
+             SERVED_PROMPT_VERSION",
+            version.unwrap_or("unstamped")
+        ));
+    }
+    Ok(())
 }
 
 /// SQL LIKE pattern matching a `model_name` stamped with `version`.
@@ -96,18 +126,18 @@ pub async fn load_from_postgres(database_url: &str) -> anyhow::Result<Snapshot> 
         let note = if *gave_up { " (re-analysis given up, status 'error')" } else { "" };
         info!("Analyses of merged PRs for {bot}: {n} {stamp} (this code writes +{EXTRACTION_PROMPT_VERSION}){note}");
     }
-    let not_served: i64 = mix
+    let total: i64 = mix.iter().map(|(_, _, _, n)| n).sum();
+    let stamped: i64 = mix
         .iter()
-        .filter(|(_, stamp, _, _)| match &served {
-            None => stamp != "unstamped",
-            Some(v) if v == EXTRACTION_PROMPT_VERSION => stamp != "current",
-            Some(_) => true,
-        })
+        .filter(|(_, stamp, _, _)| stamp != "unstamped")
         .map(|(_, _, _, n)| n)
         .sum();
+    let not_served = total - rows.len() as i64;
     if not_served > 0 {
         warn!("{not_served} analyses of merged PRs are not served (other prompt versions); see the per-bot counts above");
     }
+    let env_set = std::env::var("SERVED_PROMPT_VERSION").is_ok_and(|v| !v.trim().is_empty());
+    check_served_set(env_set, served.as_deref(), rows.len(), stamped, total).map_err(anyhow::Error::msg)?;
 
     // Load ignored tools
     let ignored_rows: Vec<(String,)> = sqlx::query_as(

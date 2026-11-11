@@ -212,7 +212,8 @@ def build_parser() -> argparse.ArgumentParser:
             "the current <model>+<prompt version> stamp, reusing their stored human actions and replacing "
             "the analysis; their labels are deleted so `label` recomputes them. Re-analyzed PRs are not "
             "selected again; a failed one is retried by the next run, up to --max-attempts. Requires --since "
-            "or --all-time; --limit is per bot (default 100), so run it in a loop, for example --limit 500."
+            "or --all-time; --limit is per bot (default 100), so run it in a loop, for example --limit 500. "
+            "It replaces the analyses the API serves: run it on a copy of the database (see the README)."
         ),
     )
     p_ana.add_argument(

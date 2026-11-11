@@ -8,9 +8,23 @@ from datetime import datetime
 import json
 import re
 from typing import Any
+import weakref
 
 from db import queries as q
 from db.connection import DBAdapter
+
+# While a transaction is open, the adapter routes every statement through that transaction's
+# connection (and SQLite holds back commits), so a statement from another task would join it and be
+# rolled back with it. Writes made during a re-analysis (the replacement transaction and the failure
+# count) therefore share one lock per adapter, across every repository on that adapter.
+_ADAPTER_LOCKS: weakref.WeakKeyDictionary[DBAdapter, asyncio.Lock] = weakref.WeakKeyDictionary()
+
+
+def _adapter_lock(db: DBAdapter) -> asyncio.Lock:
+    lock = _ADAPTER_LOCKS.get(db)
+    if lock is None:
+        lock = _ADAPTER_LOCKS[db] = asyncio.Lock()
+    return lock
 
 
 def _merge_bq_events(existing_raw: str | list | None, new_events: list[dict]) -> list[dict]:
@@ -32,7 +46,7 @@ class PRRepository:
 
     def __init__(self, db: DBAdapter):
         self.db = db
-        self._tx_lock = asyncio.Lock()
+        self._tx_lock = _adapter_lock(db)
 
     # -- Chatbots --------------------------------------------------------------
 
@@ -327,9 +341,8 @@ class PRRepository:
         labels in one transaction, so a failure anywhere leaves the old analysis (with its old
         model_name stamp) and labels in place and the PR is selected again by the next re-analysis.
 
-        `analysis` takes the keyword arguments of insert_analysis. Transactions on the adapter are
-        serialized with a lock, because a transaction routes every statement on the adapter through
-        one connection while it is open.
+        `analysis` takes the keyword arguments of insert_analysis. It holds the adapter's lock (see
+        _ADAPTER_LOCKS), as record_reanalysis_failure does.
         """
         async with self._tx_lock, self.db.transaction():
             await self.insert_analysis(pr_id=pr_id, chatbot_id=chatbot_id, **analysis)
@@ -341,15 +354,15 @@ class PRRepository:
     ) -> bool:
         """Count a failed re-analysis in the PR's error_message ("reanalyze failed N times: ...").
         At max_attempts the PR gets status 'error' (its old analysis stays) so `--reanalyze` stops
-        selecting it. Returns True when the PR was given up on."""
+        selecting it. Returns True when the PR was given up on. Holds the adapter's lock, so the
+        write never joins (and is never rolled back with) another task's replace_analysis."""
         m = re.match(r"reanalyze failed (\d+) times?", previous_message or "")
         n = (int(m.group(1)) if m else 0) + 1
         message = f"reanalyze failed {n} time{'s' if n > 1 else ''}: {reason}"[:1000]
-        if n >= max_attempts:
-            await self.db.execute(q.UPDATE_PR_ERROR, (message, pr_id))
-            return True
-        await self.db.execute(q.UPDATE_PR_ERROR_MESSAGE, (message, pr_id))
-        return False
+        gave_up = n >= max_attempts
+        async with self._tx_lock:
+            await self.db.execute(q.UPDATE_PR_ERROR if gave_up else q.UPDATE_PR_ERROR_MESSAGE, (message, pr_id))
+        return gave_up
 
     async def count_reanalysis_gave_up(self, chatbot_id: int) -> int:
         row = await self.db.fetchone(q.COUNT_REANALYSIS_GAVE_UP, (chatbot_id,))

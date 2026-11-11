@@ -395,3 +395,98 @@ async def test_cli_refuses_all_time_with_a_window(tmp_path, caplog) -> None:
     )
 
     assert "--all-time selects every analyzed PR" in caplog.text
+
+
+def _analysis_kwargs(model_name: str) -> dict:
+    return {
+        "bot_suggestions": [],
+        "human_actions": STORED_ACTIONS,
+        "matching_results": [],
+        "total_bot_comments": 0,
+        "matched_bot_comments": 0,
+        "precision": None,
+        "recall": None,
+        "f_beta": None,
+        "model_name": model_name,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_failure_recorded_while_another_replacement_rolls_back_is_kept(db: DBAdapter, monkeypatch) -> None:
+    import asyncio
+
+    repo = PRRepository(db)
+    cid, pr_a = await _seed_one(repo, "old-model")
+    await repo.insert_pr(chatbot_id=cid, repo_name="org/repo", pr_number=8, pr_url="https://x/8", pr_merged=True)
+    pr_b = (await repo.get_pr(cid, "org/repo", 8))["id"]
+    await repo.mark_assembled(pr_b, {"pr_merged": True})
+    await repo.insert_analysis(pr_id=pr_b, chatbot_id=cid, **_analysis_kwargs("old-model"))
+
+    inside = asyncio.Event()
+    real_execute = db.execute
+
+    async def execute(sql: str, args=None):
+        if "DELETE FROM pr_labels" in sql:  # A is inside its transaction: let B run, then fail
+            inside.set()
+            await asyncio.sleep(0.05)
+            raise RuntimeError("label deletion failed")
+        return await real_execute(sql, args)
+
+    monkeypatch.setattr(db, "execute", execute)
+
+    async def a() -> None:
+        with pytest.raises(RuntimeError):
+            await repo.replace_analysis(pr_a, cid, **_analysis_kwargs("judge-model+extract-v2"))
+
+    async def b() -> None:
+        await inside.wait()
+        # another repository on the same adapter (as another task would have) records B's last failure
+        assert await PRRepository(db).record_reanalysis_failure(pr_b, None, "LLM 400", max_attempts=1)
+
+    await asyncio.gather(a(), b())
+    monkeypatch.setattr(db, "execute", real_execute)
+
+    b_row = await repo.get_pr_by_id(pr_b)
+    assert b_row["status"] == "error"  # not rolled back with A's transaction
+    assert b_row["error_message"].startswith("reanalyze failed 1 time: LLM 400")
+    assert [r["model_name"] for r in await _analysis(db, pr_a)] == ["old-model"]  # A rolled back
+
+
+@pytest.mark.asyncio
+async def test_reanalysis_on_a_copy_leaves_the_served_database_complete(tmp_path, monkeypatch) -> None:
+    import shutil
+
+    import pipeline.analyze as analyze_mod
+
+    monkeypatch.setattr(analyze_mod, "LLMClient", _StubLLM)
+    _StubLLM.calls, _StubLLM.fail = [], False
+    served_path, copy_path = tmp_path / "served.db", tmp_path / "copy.db"
+    served = DBAdapter(f"sqlite:///{served_path}")
+    await served.connect()
+    try:
+        await create_tables(served)
+        cid, pr_id = await _seed_one(PRRepository(served), "old-model")
+    finally:
+        await served.close()
+    shutil.copy(served_path, copy_path)
+
+    copy = DBAdapter(f"sqlite:///{copy_path}")
+    await copy.connect()
+    try:
+        cfg = DBConfig()
+        cfg.martian_model_name = "judge-model"
+        assert await analyze_mod.analyze_prs(cfg, copy, cid, "reviewer[bot]", limit=10, reanalyze=True) == 1
+        assert [r["model_name"] for r in await _analysis(copy, pr_id)] == [
+            analyze_mod.stamped_model_name("judge-model")
+        ]
+    finally:
+        await copy.close()
+
+    served = DBAdapter(f"sqlite:///{served_path}")
+    await served.connect()
+    try:
+        # the database the API still serves keeps its whole previous set, analyses and labels
+        assert [r["model_name"] for r in await _analysis(served, pr_id)] == ["old-model"]
+        assert len(await served.fetchall("SELECT * FROM pr_labels WHERE pr_id = $1", (pr_id,))) == 1
+    finally:
+        await served.close()

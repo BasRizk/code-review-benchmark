@@ -144,27 +144,32 @@ uv run python main.py analyze --all --reanalyze --since 2026-08-01 --until 2026-
 
 ### Rolling out a prompt change
 
-Analyses store `model_name` as `"<model>+<EXTRACTION_PROMPT_VERSION>"` (`llm/prompts.py`). The API
-service serves one prompt version at a time, named by its `SERVED_PROMPT_VERSION` setting: unset, it
-keeps serving the analyses made before versions were stamped, so deploying this code changes
-nothing on the leaderboard until the setting is flipped. New analyses this code writes carry the new
-stamp, so they are not served until the flip either: run the backfill soon after deploying. After a
-change that bumps the version, in
-this order:
+Analyses store `model_name` as `"<model>+<EXTRACTION_PROMPT_VERSION>"` (`llm/prompts.py`), and the API
+service serves one prompt version at a time, named by its `SERVED_PROMPT_VERSION` setting (unset:
+the analyses made before versions were stamped). A PR has one analysis and one label row
+(`UNIQUE(pr_id, chatbot_id)`), so a re-analysis replaces the analysis the API serves. Run the
+backfill on a copy of the database, and switch the API to the copy once it is complete; the
+database the API serves is never touched, so a restart at any point serves its complete previous
+set. After a change that bumps the version, in this order:
 
-1. Pause the scheduled analyze job (`jobs/analyze_job.py`), so the backfill runs alone.
-2. Backfill every served row: `analyze --all --reanalyze --all-time --limit 500` in a loop until its
+1. Pause the scheduled analyze job (`jobs/analyze_job.py`). Deploy the ETL code with the new version
+   only inside these steps: run on the served database, it writes stamped analyses there, and the
+   API then refuses to restart until `SERVED_PROMPT_VERSION` is set.
+2. Copy the database the API serves, e.g. `createdb -T <served db> <copy db>` (needs no other open
+   connections to the served database) or `pg_dump <served db> | psql <copy db>`. Run the next
+   steps with `--database-url` (or `DATABASE_URL`) pointing at the copy.
+3. Backfill every row: `analyze --all --reanalyze --all-time --limit 500` in a loop until its
    `--dry-run` selects 0 for every bot. A failed re-analysis keeps its old row and is retried; after
    `--max-attempts` failures it is given up (status `error`).
-3. Run `label --all --limit 500` in a loop until it labels nothing: re-analysis deletes the affected
+4. Run `label --all --limit 500` in a loop until it labels nothing: re-analysis deletes the affected
    labels.
-4. Check completeness: at start the API logs, per bot and over merged PRs only (what the leaderboard
-   reads), how many analyses carry the current stamp, none, or another one, and how many were given
-   up. Every served row should carry the current stamp; given-up PRs drop out of the leaderboard
-   once the setting is flipped.
-5. Set `SERVED_PROMPT_VERSION` to the new version (e.g. `extract-v2`) and restart or redeploy the API
-   service (it loads analyses only at start).
-6. Resume the `analyze` job.
+5. Switch: start the API service on the copy (`DATABASE_URL`) with `SERVED_PROMPT_VERSION` set to the
+   new version (e.g. `extract-v2`). At start it logs, per bot and over merged PRs only (what the
+   leaderboard reads), how many analyses carry the current stamp, none, or another one, and how many
+   were given up; given-up PRs keep their old analysis and are not served. The API refuses to start,
+   rather than serve part of a board, when `SERVED_PROMPT_VERSION` is unset on a database that holds
+   stamped analyses, or when the version it names has no analyses.
+6. Resume the `analyze` job on the copy, which is now the served database.
 
 ### Label PRs
 
